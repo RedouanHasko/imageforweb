@@ -1,0 +1,4 @@
+flask>=2.3
+pillow>=9.0
+# Optional for AVIF support:
+# pillow-avif-plugin
