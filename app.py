@@ -20,6 +20,23 @@ import uuid
 import tempfile
 import os
 import time
+import subprocess
+import shutil
+try:
+  from pdf2docx import Converter
+except Exception:
+  Converter = None
+try:
+  import pytesseract
+except Exception:
+  pytesseract = None
+try:
+  from docx import Document
+except Exception:
+  Document = None
+
+# Detect LibreOffice `soffice` executable if available for high-fidelity PDF->DOCX
+SOFFICE = shutil.which('soffice') or shutil.which('soffice.exe')
 
 # In-memory job store. For production consider a persistent queue/storage.
 jobs = {}
@@ -74,6 +91,7 @@ def index():
               <option value='png'>PNG</option>
               <option value='avif'>AVIF (optional)</option>
               <option value='pdf'>PDF (images → single-page PDF or PDF passthrough)</option>
+              <option value='docx'>DOCX (editable Word document)</option>
             </select>
             <div id='pdfHint' class='text-xs text-zinc-500 mt-2 hidden'>Higher <strong>Quality</strong> increases rendering DPI and file size for PDFs.</div>
           </div>
@@ -101,6 +119,14 @@ def index():
           <label id='combineWrap' class='hidden items-center gap-3 text-zinc-300'>
             <input id='combinePdf' name='combine_pdf' type='checkbox' value='1' class='h-5 w-5 accent-indigo-500 rounded' />
             <span class='select-none'>Combine into a single PDF</span>
+          </label>
+          <label id='ocrWrap' class='items-center gap-3 text-zinc-300'>
+            <input id='ocrCheckbox' name='ocr' type='checkbox' value='1' class='h-5 w-5 accent-indigo-500 rounded' />
+            <span class='select-none'>OCR (make scanned PDFs/images editable)</span>
+          </label>
+          <label id='preserveWrap' class='hidden items-center gap-3 text-zinc-300'>
+            <input id='preserveLayout' name='preserve_layout' type='checkbox' value='1' class='h-5 w-5 accent-indigo-500 rounded' />
+            <span class='select-none'>Preserve layout (LibreOffice)</span>
           </label>
           <div class='flex-1'></div>
         </div>
@@ -181,13 +207,30 @@ def index():
     const qualityVal = document.getElementById('qualityVal');
     if (qualityRange && qualityVal) { qualityRange.addEventListener('input', (e) => { qualityVal.textContent = e.target.value; }); }
 
-    // Show / hide Combine PDF option when format == pdf
+    // Show / hide Combine / Preserve options depending on selected format
     const formatSelect = uploadForm.querySelector('select[name="format"]');
     const combineWrap = document.getElementById('combineWrap');
+    const preserveWrap = document.getElementById('preserveWrap');
     if (formatSelect && combineWrap) {
       function updateCombineVisibility() {
         const pdfHint = document.getElementById('pdfHint');
-        if (formatSelect.value === 'pdf') { combineWrap.classList.remove('hidden'); if (pdfHint) pdfHint.classList.remove('hidden'); } else { combineWrap.classList.add('hidden'); if (pdfHint) pdfHint.classList.add('hidden'); const cb = document.getElementById('combinePdf'); if (cb) cb.checked = false; }
+        if (formatSelect.value === 'pdf') {
+          combineWrap.classList.remove('hidden');
+          if (pdfHint) pdfHint.classList.remove('hidden');
+        } else {
+          combineWrap.classList.add('hidden');
+          if (pdfHint) pdfHint.classList.add('hidden');
+          const cb = document.getElementById('combinePdf'); if (cb) cb.checked = false;
+        }
+        // Show preserve layout option only for DOCX output
+        if (preserveWrap) {
+          if (formatSelect.value === 'docx') {
+            preserveWrap.classList.remove('hidden');
+          } else {
+            preserveWrap.classList.add('hidden');
+            const pb = document.getElementById('preserveLayout'); if (pb) pb.checked = false;
+          }
+        }
       }
       formatSelect.addEventListener('change', updateCombineVisibility); updateCombineVisibility();
     }
@@ -204,7 +247,7 @@ def index():
 
     // Progress and status logic
     uploadForm.addEventListener('submit', function(e) { e.preventDefault(); statusMsg.textContent = ''; statusMsg.className = ''; if (files.length === 0) { statusMsg.textContent = 'Please select at least one file.'; statusMsg.className = 'text-red-400'; return; } progressArea.classList.remove('hidden'); progressBar.style.width = '0%'; progressText.textContent = '0%'; processedCount.textContent = '';
-      const formData = new FormData(); const format = uploadForm.querySelector('select[name="format"]').value; const maxw = uploadForm.querySelector('input[name="max_width"]').value || ''; const maxh = uploadForm.querySelector('input[name="max_height"]').value || ''; const qualityControl = document.getElementById('qualityRange'); const qualityValToSend = qualityControl ? qualityControl.value : (uploadForm.querySelector('input[name="quality"]') ? uploadForm.querySelector('input[name="quality"]').value : '85'); formData.append('format', format); formData.append('quality', qualityValToSend); formData.append('max_width', maxw); formData.append('max_height', maxh); files.forEach(f => formData.append('files', f)); const combineCheckbox = document.getElementById('combinePdf'); formData.append('combine_pdf', combineCheckbox && combineCheckbox.checked ? '1' : '0');
+      const formData = new FormData(); const format = uploadForm.querySelector('select[name="format"]').value; const maxw = uploadForm.querySelector('input[name="max_width"]').value || ''; const maxh = uploadForm.querySelector('input[name="max_height"]').value || ''; const qualityControl = document.getElementById('qualityRange'); const qualityValToSend = qualityControl ? qualityControl.value : (uploadForm.querySelector('input[name="quality"]') ? uploadForm.querySelector('input[name="quality"]').value : '85'); formData.append('format', format); formData.append('quality', qualityValToSend); formData.append('max_width', maxw); formData.append('max_height', maxh); files.forEach(f => formData.append('files', f)); const combineCheckbox = document.getElementById('combinePdf'); formData.append('combine_pdf', combineCheckbox && combineCheckbox.checked ? '1' : '0'); const ocrCheckbox = document.getElementById('ocrCheckbox'); formData.append('ocr', ocrCheckbox && ocrCheckbox.checked ? '1' : '0'); const preserveCheckbox = document.getElementById('preserveLayout'); formData.append('preserve_layout', preserveCheckbox && preserveCheckbox.checked ? '1' : '0');
       const xhr = new XMLHttpRequest(); xhr.open('POST', '/start', true); xhr.responseType = 'json'; xhr.upload.onprogress = function(e) { if (e.lengthComputable) { const percent = Math.round((e.loaded / e.total) * 100 * 0.4); progressBar.style.width = percent + '%'; progressText.textContent = percent + '%'; } };
       xhr.onload = function() { if (xhr.status === 200 && xhr.response && xhr.response.job_id) { const jobId = xhr.response.job_id; const total = xhr.response.total || files.length; imageCount.textContent = total + ' file' + (total > 1 ? 's' : '') + ' queued'; const poll = setInterval(async () => { try { const res = await fetch(`/status/${jobId}`); const data = await res.json(); if (data.error) { clearInterval(poll); statusMsg.textContent = 'Error: ' + data.error; statusMsg.className = 'text-red-400'; return; } if (data.items) { renderFileList(data.items); } const proc = data.processed || 0; const tot = data.total || total; const serverPercent = Math.round((proc / (tot || 1)) * 100 * 0.6); const uploadPercent = parseInt(progressText.textContent) || 0; const combined = Math.min(100, uploadPercent + serverPercent); progressBar.style.width = combined + '%'; progressText.textContent = combined + '%'; processedCount.textContent = proc + ' / ' + tot + ' processed'; if (data.status === 'done') { clearInterval(poll); progressBar.style.width = '100%'; progressText.textContent = '100%'; statusMsg.textContent = 'Done!'; statusMsg.className = 'text-green-400'; fetch(`/download/${jobId}`).then(r => r.blob()).then(blob => { const url = window.URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'optimized_images.zip'; document.body.appendChild(a); a.click(); setTimeout(() => { window.URL.revokeObjectURL(url); document.body.removeChild(a); }, 100); }).catch(err => { statusMsg.textContent = 'Download error'; statusMsg.className = 'text-red-400'; }); } else if (data.status === 'error') { clearInterval(poll); statusMsg.textContent = 'Error: ' + data.error; statusMsg.className = 'text-red-400'; } } catch (err) { clearInterval(poll); statusMsg.textContent = 'Status error'; statusMsg.className = 'text-red-400'; } }, 600); } else { statusMsg.textContent = 'Failed to start job.'; statusMsg.className = 'text-red-400'; } };
       xhr.onerror = function() { statusMsg.textContent = 'Network error.'; statusMsg.className = 'text-red-400'; };
@@ -267,7 +310,7 @@ def optimize_images():
 # pip install flask pillow
 
 
-def _process_job(job_id, file_blobs, output_format, quality, max_w, max_h, combine_pdf=False):
+def _process_job(job_id, file_blobs, output_format, quality, max_w, max_h, combine_pdf=False, ocr=False, preserve_layout=False):
   """Background worker to process images for a job and write a ZIP to disk.
   Updates the shared `jobs` dict with progress.
   """
@@ -285,7 +328,7 @@ def _process_job(job_id, file_blobs, output_format, quality, max_w, max_h, combi
         try:
           # Handle PDF inputs before attempting to open as images
           in_name_l = name.lower()
-          if in_name_l.endswith('.pdf') and output_format in ('webp', 'jpeg', 'png', 'avif'):
+          if in_name_l.endswith('.pdf'):
             if not convert_from_bytes and not fitz:
               raise RuntimeError('pdf2image not available; install pdf2image and poppler, or install PyMuPDF as a fallback')
             # Choose rendering DPI based on requested quality to preserve visual detail
@@ -339,33 +382,180 @@ def _process_job(job_id, file_blobs, output_format, quality, max_w, max_h, combi
                     jobs[job_id]['items'][idx]['error'] = msg
                     jobs[job_id]['processed'] = processed
                 continue
-            # write each page as separate file (or collect pages for combined PDF)
-            for pidx, page in enumerate(pages, start=1):
-              pout = io.BytesIO()
-              fmt = output_format
-              if fmt == 'jpeg': save_fmt = 'JPEG'
-              elif fmt == 'png': save_fmt = 'PNG'
-              else: save_fmt = 'WEBP'
-              page = page.convert('RGB')
-              if save_fmt == 'WEBP':
-                page.save(pout, format='WEBP', quality=quality, method=6)
-                ext = 'webp'
-              elif save_fmt == 'PNG':
-                page.save(pout, format='PNG', optimize=True)
-                ext = 'png'
+            # write each page as separate file (or collect pages for combined PDF / DOCX)
+            if output_format in ('webp', 'jpeg', 'png', 'avif'):
+              for pidx, page in enumerate(pages, start=1):
+                pout = io.BytesIO()
+                fmt = output_format
+                if fmt == 'jpeg': save_fmt = 'JPEG'
+                elif fmt == 'png': save_fmt = 'PNG'
+                else: save_fmt = 'WEBP'
+                page = page.convert('RGB')
+                if save_fmt == 'WEBP':
+                  page.save(pout, format='WEBP', quality=quality, method=6)
+                  ext = 'webp'
+                elif save_fmt == 'PNG':
+                  page.save(pout, format='PNG', optimize=True)
+                  ext = 'png'
+                else:
+                  page.save(pout, format='JPEG', quality=quality, optimize=True, progressive=True)
+                  ext = 'jpg'
+                if combined_pages is not None:
+                  combined_pages.append(page)
+                else:
+                  zipf.writestr(f"{os.path.splitext(name)[0]}_page{pidx}.{ext}", pout.getvalue())
+              processed += 1
+              with jobs_lock:
+                if job_id in jobs and 'items' in jobs[job_id] and idx < len(jobs[job_id]['items']):
+                  jobs[job_id]['items'][idx]['status'] = 'done'
+                  jobs[job_id]['items'][idx]['out_name'] = f"{os.path.splitext(name)[0]}_pages.{output_format}"
+              continue
+            elif output_format == 'docx':
+              # Try high-fidelity LibreOffice conversion when requested
+              filename = os.path.splitext(name)[0]
+              if preserve_layout and SOFFICE:
+                try:
+                  tmp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
+                  tmp_pdf.write(blob)
+                  tmp_pdf.close()
+                  outdir = tempfile.mkdtemp()
+                  cmd = [SOFFICE, '--headless', '--convert-to', 'docx', '--outdir', outdir, tmp_pdf.name]
+                  subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                  out_path = os.path.join(outdir, os.path.splitext(os.path.basename(tmp_pdf.name))[0] + '.docx')
+                  with open(out_path, 'rb') as rf:
+                    data = rf.read()
+                  zipf.writestr(f"{filename}.docx", data)
+                  # cleanup
+                  try:
+                    os.unlink(tmp_pdf.name)
+                  except Exception:
+                    pass
+                  try:
+                    os.remove(out_path)
+                  except Exception:
+                    pass
+                  try:
+                    os.rmdir(outdir)
+                  except Exception:
+                    pass
+                except Exception as e:
+                  # If soffice fails, fall back to the next available method
+                  try:
+                    if os.path.exists(tmp_pdf.name):
+                      os.unlink(tmp_pdf.name)
+                  except Exception:
+                    pass
+                else:
+                  processed += 1
+                  with jobs_lock:
+                    if job_id in jobs and 'items' in jobs[job_id] and idx < len(jobs[job_id]['items']):
+                      jobs[job_id]['items'][idx]['status'] = 'done'
+                      jobs[job_id]['items'][idx]['out_name'] = f"{os.path.splitext(name)[0]}.docx"
+                  continue
+
+              # Try using pdf2docx for digital PDFs when OCR is not requested
+              if Converter and not ocr:
+                try:
+                  tmp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
+                  tmp_pdf.write(blob)
+                  tmp_pdf.close()
+                  tmp_out = tempfile.NamedTemporaryFile(delete=False, suffix='.docx')
+                  tmp_out.close()
+                  conv = Converter(tmp_pdf.name)
+                  conv.convert(tmp_out.name)
+                  conv.close()
+                  with open(tmp_out.name, 'rb') as rf:
+                    data = rf.read()
+                  zipf.writestr(f"{filename}.docx", data)
+                except Exception as e:
+                  with jobs_lock:
+                    jobs[job_id]['items'][idx]['status'] = 'error'
+                    jobs[job_id]['items'][idx]['error'] = str(e)
+                finally:
+                  try:
+                    os.unlink(tmp_pdf.name)
+                  except Exception:
+                    pass
+                  try:
+                    os.unlink(tmp_out.name)
+                  except Exception:
+                    pass
               else:
-                page.save(pout, format='JPEG', quality=quality, optimize=True, progressive=True)
-                ext = 'jpg'
-              if combined_pages is not None:
-                combined_pages.append(page)
-              else:
-                zipf.writestr(f"{os.path.splitext(name)[0]}_page{pidx}.{ext}", pout.getvalue())
-            processed += 1
-            with jobs_lock:
-              if job_id in jobs and 'items' in jobs[job_id] and idx < len(jobs[job_id]['items']):
-                jobs[job_id]['items'][idx]['status'] = 'done'
-                jobs[job_id]['items'][idx]['out_name'] = f"{os.path.splitext(name)[0]}_pages.{output_format}"
-            continue
+                # Prefer PyMuPDF text extraction for digital PDFs (no OCR), otherwise fall back to OCR on images
+                if not Document:
+                  with jobs_lock:
+                    jobs[job_id]['items'][idx]['status'] = 'error'
+                    jobs[job_id]['items'][idx]['error'] = 'python-docx not installed'
+                  continue
+                if not ocr and fitz:
+                  try:
+                    doc = Document()
+                    pdfdoc = fitz.open(stream=blob, filetype='pdf')
+                    for p in pdfdoc:
+                      try:
+                        text = p.get_text('text')
+                      except Exception:
+                        text = ''
+                      if text:
+                        for line in text.splitlines():
+                          if line.strip():
+                            doc.add_paragraph(line)
+                      # Optionally embed a low-res image of the page for reference
+                      try:
+                        pix = p.get_pixmap(alpha=False)
+                        tmp_img = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
+                        pix.save(tmp_img.name)
+                        tmp_img.close()
+                        doc.add_picture(tmp_img.name)
+                        os.unlink(tmp_img.name)
+                      except Exception:
+                        pass
+                    outbuf = io.BytesIO()
+                    doc.save(outbuf)
+                    zipf.writestr(f"{filename}.docx", outbuf.getvalue())
+                  except Exception as e:
+                    with jobs_lock:
+                      jobs[job_id]['items'][idx]['status'] = 'error'
+                      jobs[job_id]['items'][idx]['error'] = str(e)
+                    continue
+                else:
+                  # OCR-based fallback: render pages and extract text with pytesseract
+                  doc = Document()
+                  for pidx, page in enumerate(pages, start=1):
+                    text = ''
+                    if pytesseract:
+                      try:
+                        text = pytesseract.image_to_string(page)
+                      except Exception:
+                        text = ''
+                    if text:
+                      for line in text.splitlines():
+                        if line.strip():
+                          doc.add_paragraph(line)
+                    # embed page image as well
+                    try:
+                      tmp_img = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
+                      page.save(tmp_img.name, format='PNG')
+                      tmp_img.close()
+                      doc.add_picture(tmp_img.name)
+                      os.unlink(tmp_img.name)
+                    except Exception:
+                      pass
+                  outbuf = io.BytesIO()
+                  try:
+                    doc.save(outbuf)
+                    zipf.writestr(f"{filename}.docx", outbuf.getvalue())
+                  except Exception as e:
+                    with jobs_lock:
+                      jobs[job_id]['items'][idx]['status'] = 'error'
+                      jobs[job_id]['items'][idx]['error'] = str(e)
+                    continue
+              processed += 1
+              with jobs_lock:
+                if job_id in jobs and 'items' in jobs[job_id] and idx < len(jobs[job_id]['items']):
+                  jobs[job_id]['items'][idx]['status'] = 'done'
+                  jobs[job_id]['items'][idx]['out_name'] = f"{os.path.splitext(name)[0]}.docx"
+              continue
 
           img = Image.open(io.BytesIO(blob)).convert('RGB')
           # Resize if needed while preserving aspect ratio
@@ -490,7 +680,9 @@ def start_job():
 
   # Start background worker
   combine_pdf = request.form.get('combine_pdf', '0') in ('1', 'true', 'True')
-  t = threading.Thread(target=_process_job, args=(job_id, file_blobs, output_format, quality, max_w, max_h, combine_pdf), daemon=True)
+  ocr = request.form.get('ocr', '0') in ('1', 'true', 'True')
+  preserve_layout = request.form.get('preserve_layout', '0') in ('1', 'true', 'True')
+  t = threading.Thread(target=_process_job, args=(job_id, file_blobs, output_format, quality, max_w, max_h, combine_pdf, ocr, preserve_layout), daemon=True)
   t.start()
 
   return jsonify({'job_id': job_id, 'total': len(file_blobs)})

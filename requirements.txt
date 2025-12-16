@@ -1,3 +1,9 @@
+# Optional fallback renderer without poppler:
+# pymupdf (install with `pip install pymupdf`)
+# DOCX/OCR support
+pdf2docx>=0.5.7
+python-docx>=0.8.11
+pytesseract>=0.3.10
 flask>=2.3
 pillow>=9.0
 # Optional for AVIF support:
