@@ -5,6 +5,14 @@
 
 from flask import Flask, request, send_file, Response, jsonify
 from PIL import Image
+try:
+  from pdf2image import convert_from_bytes
+except Exception:
+  convert_from_bytes = None
+try:
+  import fitz  # PyMuPDF
+except Exception:
+  fitz = None
 import io
 import zipfile
 import threading
@@ -30,69 +38,102 @@ def index():
   <title>Image Optimizer</title>
   <script src='https://cdn.tailwindcss.com'></script>
   <style>
-    .drag-active { border: 2px dashed #6366f1 !important; background: #3730a3 !important; }
+    .drag-active { border: 2px dashed #6366f1 !important; background: rgba(99,102,241,0.06) !important; }
   </style>
 </head>
-<body class='bg-zinc-900 text-white min-h-screen flex items-center justify-center'>
-  <div class='w-full max-w-xl bg-zinc-800 rounded-2xl p-8 shadow-xl'>
-    <h1 class='text-2xl font-bold mb-2'>Web Image Optimizer</h1>
-    <p class='text-zinc-400 mb-6'>Convert PNG & JPEG images into lightweight, web-optimized images with best quality.</p>
-
-    <!-- Drag and Drop Area -->
-    <form id='uploadForm' action='/optimize' method='post' enctype='multipart/form-data'>
-      <div id='dropArea' class='relative w-full mb-4 flex flex-col items-center justify-center border-2 border-dashed border-zinc-600 rounded-lg p-6 transition'>
-        <svg class='w-10 h-10 mb-2 text-indigo-400' fill='none' stroke='currentColor' stroke-width='2' viewBox='0 0 24 24'><path stroke-linecap='round' stroke-linejoin='round' d='M7 16V4a1 1 0 0 1 1-1h8a1 1 0 0 1 1 1v12m-5 4v-4m0 0l-2 2m2-2l2 2'></path></svg>
-        <span class='text-zinc-400'>Drag & drop images here or click to select</span>
-        <input id='fileInput' type='file' name='files' multiple accept='image/png,image/jpeg' class='absolute inset-0 opacity-0 cursor-pointer' />
+<body class='bg-gradient-to-b from-zinc-900 via-zinc-900 to-zinc-800 text-white min-h-screen flex items-center justify-center p-6'>
+  <div class='w-full max-w-5xl grid grid-cols-12 gap-8'>
+    <div class='col-span-7 bg-zinc-800/70 backdrop-blur rounded-3xl p-8 shadow-xl'>
+      <div class='flex items-center justify-between mb-6'>
+        <div>
+          <h1 class='text-4xl font-extrabold'>Image Optimizer</h1>
+          <p class='text-zinc-400 mt-1'>Fast conversions — images, PDFs, combined PDFs.</p>
+        </div>
+        <div class='text-right text-sm text-zinc-400'>
+          <div>Drag & drop or click to select</div>
+          <div class='mt-2'>Formats: WebP, JPEG, PNG, AVIF, PDF</div>
+        </div>
       </div>
 
-      <div class='flex justify-between mb-4 text-sm'>
-        <span id='imageCount' class='text-zinc-400'>No images selected</span>
-        <span id='processedCount' class='text-zinc-400'></span>
-      </div>
-      <div id='fileList' class='mb-4 text-sm'></div>
+      <form id='uploadForm' action='/optimize' method='post' enctype='multipart/form-data'>
+        <div id='dropArea' class='relative mb-6 flex flex-col items-center justify-center border-2 border-dashed border-zinc-600 rounded-3xl p-8 min-h-[14rem] transition'>
+          <svg class='w-14 h-14 mb-3 text-indigo-400' fill='none' stroke='currentColor' stroke-width='1.5' viewBox='0 0 24 24'><path stroke-linecap='round' stroke-linejoin='round' d='M7 16V4a1 1 0 0 1 1-1h8a1 1 0 0 1 1 1v12m-5 4v-4m0 0l-2 2m2-2l2 2'/></svg>
+          <div class='text-center'>
+            <div class='text-lg font-medium text-zinc-200'>Drop files here</div>
+            <div class='text-sm text-zinc-500'>Images (PNG/JPEG) or PDFs — click to open file picker</div>
+          </div>
+          <input id='fileInput' type='file' name='files' multiple accept='image/png,image/jpeg,application/pdf' class='absolute inset-0 opacity-0 cursor-pointer' />
+        </div>
 
-        <div class='grid grid-cols-2 gap-2 mb-4'>
-          <label class='text-zinc-300 text-xs'>Format
-            <select name='format' class='w-full mt-1 bg-zinc-700 rounded-lg p-2'>
+        <div class='grid grid-cols-2 gap-4 mb-4'>
+          <div>
+            <label class='text-zinc-300 text-sm'>Format</label>
+            <select name='format' class='mt-2 w-full bg-zinc-700 rounded-lg p-3'>
               <option value='webp'>WebP (Recommended)</option>
               <option value='jpeg'>JPEG</option>
               <option value='png'>PNG</option>
               <option value='avif'>AVIF (optional)</option>
+              <option value='pdf'>PDF (images → single-page PDF or PDF passthrough)</option>
             </select>
-          </label>
+            <div id='pdfHint' class='text-xs text-zinc-500 mt-2 hidden'>Higher <strong>Quality</strong> increases rendering DPI and file size for PDFs.</div>
+          </div>
 
-          <label class='text-zinc-300 text-xs'>Quality
-            <div class='mt-1 flex items-center space-x-2'>
-              <input id='qualityRange' name='quality' type='range' min='10' max='100' value='85' class='w-full' />
+          <div>
+            <label class='text-zinc-300 text-sm'>Quality</label>
+            <div class='mt-2 flex items-center gap-3'>
+              <input id='qualityRange' name='quality' type='range' min='10' max='100' value='85' class='flex-1' />
               <div id='qualityVal' class='w-14 text-right text-zinc-300'>85</div>
             </div>
-          </label>
+          </div>
 
-          <label class='text-zinc-300 text-xs'>Max Width (px)
-            <input name='max_width' type='number' min='0' placeholder='1920' class='w-full mt-1 bg-zinc-700 rounded-lg p-2' />
-          </label>
+          <div>
+            <label class='text-zinc-300 text-sm'>Max Width (px)</label>
+            <input name='max_width' type='number' min='0' placeholder='1920' class='mt-2 w-full bg-zinc-700 rounded-lg p-3' />
+          </div>
 
-          <label class='text-zinc-300 text-xs'>Max Height (px)
-            <input name='max_height' type='number' min='0' placeholder='1080' class='w-full mt-1 bg-zinc-700 rounded-lg p-2' />
-          </label>
+          <div>
+            <label class='text-zinc-300 text-sm'>Max Height (px)</label>
+            <input name='max_height' type='number' min='0' placeholder='1080' class='mt-2 w-full bg-zinc-700 rounded-lg p-3' />
+          </div>
         </div>
 
-        <button id='submitBtn' type='submit' class='w-full bg-indigo-600 hover:bg-indigo-700 transition rounded-lg py-3 font-semibold'>
-          Start
-        </button>
-    </form>
+        <div class='flex items-center gap-4 mb-6'>
+          <label id='combineWrap' class='hidden items-center gap-3 text-zinc-300'>
+            <input id='combinePdf' name='combine_pdf' type='checkbox' value='1' class='h-5 w-5 accent-indigo-500 rounded' />
+            <span class='select-none'>Combine into a single PDF</span>
+          </label>
+          <div class='flex-1'></div>
+        </div>
 
-    <div id='progressArea' class='mt-4 hidden'>
-      <div class='w-full bg-zinc-700 rounded-lg h-4 mb-2'>
-        <div id='progressBar' class='bg-indigo-500 h-4 rounded-lg transition-all' style='width:0%'></div>
-      </div>
-      <div class='flex justify-between text-xs'>
-        <span id='progressText'>0%</span>
-        <span id='statusMsg'></span>
+        <div class='flex gap-3'>
+          <button id='submitBtn' type='submit' class='flex-1 bg-indigo-600 hover:bg-indigo-700 rounded-2xl py-3 text-lg font-semibold'>Start</button>
+          <button id='clearBtn' type='button' class='w-40 bg-zinc-600 hover:bg-zinc-700 rounded-2xl py-3 text-sm'>Clear</button>
+        </div>
+      </form>
+    </div>
+
+    <div class='col-span-5'>
+      <div class='bg-zinc-800/60 rounded-3xl p-6 shadow-lg h-full flex flex-col'>
+        <div class='mb-4 flex items-center justify-between'>
+          <div class='text-sm text-zinc-400'>Selected files</div>
+          <div id='imageCount' class='text-sm text-zinc-400'>No files selected</div>
+        </div>
+        <div id='fileList' class='flex-1 overflow-auto space-y-3 mb-4'></div>
+
+        <div id='progressArea' class='hidden'>
+          <div class='w-full bg-zinc-700 rounded-xl h-4 mb-3 overflow-hidden'>
+            <div id='progressBar' class='bg-indigo-500 h-4 rounded-xl transition-all' style='width:0%'></div>
+          </div>
+          <div class='flex justify-between text-sm'>
+            <div id='progressText'>0%</div>
+            <div id='processedCount' class='text-zinc-400'></div>
+          </div>
+          <div id='statusMsg' class='mt-2 text-sm'></div>
+        </div>
       </div>
     </div>
   </div>
+
   <script>
     // Drag and drop logic
     const dropArea = document.getElementById('dropArea');
@@ -108,23 +149,18 @@ def index():
 
     function updateImageCount() {
       if (files.length === 0) {
-        imageCount.textContent = 'No images selected';
+        imageCount.textContent = 'No files selected';
       } else {
-        imageCount.textContent = files.length + ' image' + (files.length > 1 ? 's' : '') + ' selected';
+        imageCount.textContent = files.length + ' file' + (files.length > 1 ? 's' : '') + ' selected';
       }
     }
 
     function renderFileList(serverItems) {
-      // serverItems is optional array from /status, same order as files
       const list = document.getElementById('fileList');
-      if (!files || files.length === 0) {
-        list.innerHTML = '';
-        return;
-      }
-      let html = "<div class='space-y-2'>";
+      if (!files || files.length === 0) { list.innerHTML = ''; return; }
+      let html = "";
       files.forEach((f, i) => {
         const sizeKB = Math.round(f.size / 1024);
-        const ext = (f.name || f.type).split('/').pop() || (f.name && f.name.split('.').pop()) || '';
         let status = 'queued';
         let out = '';
         if (serverItems && serverItems[i]) {
@@ -132,173 +168,46 @@ def index():
           out = serverItems[i].out_name ? (' → ' + serverItems[i].out_name) : '';
         }
         const color = status === 'done' ? 'text-green-400' : status === 'processing' ? 'text-indigo-300' : status === 'error' ? 'text-red-400' : 'text-zinc-400';
-        html += `<div class='flex justify-between items-center bg-zinc-700 p-2 rounded-lg'>`;
-        html += `<div class='truncate'><strong>${f.name}</strong> <span class='text-zinc-400'>(${sizeKB} KB)</span>${out}</div>`;
-        html += `<div class='ml-4 ${color}'>${status}</div>`;
+        html += `<div class='flex items-center justify-between bg-zinc-700 p-3 rounded-2xl'>`;
+        html += `<div class='truncate'><strong class='text-sm'>${f.name}</strong> <span class='text-zinc-400 text-sm'>(${sizeKB} KB)</span>${out}</div>`;
+        html += `<div class='ml-4 ${color} text-sm'>${status}</div>`;
         html += `</div>`;
       });
-      html += "</div>";
       list.innerHTML = html;
     }
 
     // Quality slider sync
     const qualityRange = document.getElementById('qualityRange');
     const qualityVal = document.getElementById('qualityVal');
-    if (qualityRange && qualityVal) {
-      qualityRange.addEventListener('input', (e) => { qualityVal.textContent = e.target.value; });
+    if (qualityRange && qualityVal) { qualityRange.addEventListener('input', (e) => { qualityVal.textContent = e.target.value; }); }
+
+    // Show / hide Combine PDF option when format == pdf
+    const formatSelect = uploadForm.querySelector('select[name="format"]');
+    const combineWrap = document.getElementById('combineWrap');
+    if (formatSelect && combineWrap) {
+      function updateCombineVisibility() {
+        const pdfHint = document.getElementById('pdfHint');
+        if (formatSelect.value === 'pdf') { combineWrap.classList.remove('hidden'); if (pdfHint) pdfHint.classList.remove('hidden'); } else { combineWrap.classList.add('hidden'); if (pdfHint) pdfHint.classList.add('hidden'); const cb = document.getElementById('combinePdf'); if (cb) cb.checked = false; }
+      }
+      formatSelect.addEventListener('change', updateCombineVisibility); updateCombineVisibility();
     }
 
-    dropArea.addEventListener('click', (e) => {
-      // Prevent double-opening: if the real file input was the target, don't re-trigger click
-      if (e.target === fileInput) return;
-      fileInput.click();
-    });
-    dropArea.addEventListener('dragover', e => {
-      e.preventDefault();
-      dropArea.classList.add('drag-active');
-    });
-    dropArea.addEventListener('dragleave', e => {
-      e.preventDefault();
-      dropArea.classList.remove('drag-active');
-    });
-    dropArea.addEventListener('drop', e => {
-      e.preventDefault();
-      dropArea.classList.remove('drag-active');
-      const dropped = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('image/'));
-      // append new files, dedupe by name+size
-      dropped.forEach(df => { if (!files.some(f => f.name === df.name && f.size === df.size)) files.push(df); });
-      // sync hidden input to reflect all files
-      const dt = new DataTransfer(); files.forEach(f => dt.items.add(f)); fileInput.files = dt.files;
-      updateImageCount();
-      renderFileList();
-    });
-    fileInput.addEventListener('change', e => {
-      const newly = Array.from(fileInput.files).filter(f => f.type.startsWith('image/'));
-      newly.forEach(nf => { if (!files.some(f => f.name === nf.name && f.size === nf.size)) files.push(nf); });
-      // rebuild fileInput.files to include all files
-      const dt2 = new DataTransfer(); files.forEach(f => dt2.items.add(f)); fileInput.files = dt2.files;
-      updateImageCount();
-      renderFileList();
-    });
+    // Clear / reset UI and selected files
+    const clearBtn = document.getElementById('clearBtn');
+    if (clearBtn) { clearBtn.addEventListener('click', () => { files = []; const dt = new DataTransfer(); fileInput.files = dt.files; try { fileInput.value = ''; } catch (e) {} updateImageCount(); renderFileList(); progressArea.classList.add('hidden'); progressBar.style.width = '0%'; progressText.textContent = '0%'; statusMsg.textContent = ''; processedCount.textContent = ''; const fmt = uploadForm.querySelector('select[name="format"]'); if (fmt) fmt.value = 'webp'; if (qualityRange) { qualityRange.value = 85; qualityVal.textContent = '85'; } const mw = uploadForm.querySelector('input[name="max_width"]'); const mh = uploadForm.querySelector('input[name="max_height"]'); if (mw) mw.value = ''; if (mh) mh.value = ''; }); }
+
+    dropArea.addEventListener('click', (e) => { if (e.target === fileInput) return; fileInput.click(); });
+    dropArea.addEventListener('dragover', e => { e.preventDefault(); dropArea.classList.add('drag-active'); });
+    dropArea.addEventListener('dragleave', e => { e.preventDefault(); dropArea.classList.remove('drag-active'); });
+    dropArea.addEventListener('drop', e => { e.preventDefault(); dropArea.classList.remove('drag-active'); const dropped = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('image/') || f.type === 'application/pdf' || (f.name && f.name.toLowerCase().endsWith('.pdf'))); dropped.forEach(df => { if (!files.some(f => f.name === df.name && f.size === df.size)) files.push(df); }); const dt = new DataTransfer(); files.forEach(f => dt.items.add(f)); fileInput.files = dt.files; updateImageCount(); renderFileList(); });
+    fileInput.addEventListener('change', e => { const newly = Array.from(fileInput.files).filter(f => f.type.startsWith('image/') || f.type === 'application/pdf' || (f.name && f.name.toLowerCase().endsWith('.pdf'))); newly.forEach(nf => { if (!files.some(f => f.name === nf.name && f.size === nf.size)) files.push(nf); }); const dt2 = new DataTransfer(); files.forEach(f => dt2.items.add(f)); fileInput.files = dt2.files; updateImageCount(); renderFileList(); });
 
     // Progress and status logic
-    uploadForm.addEventListener('submit', function(e) {
-      e.preventDefault();
-      statusMsg.textContent = '';
-      statusMsg.className = '';
-      if (files.length === 0) {
-        statusMsg.textContent = 'Please select at least one image.';
-        statusMsg.className = 'text-red-400';
-        return;
-      }
-      progressArea.classList.remove('hidden');
-      progressBar.style.width = '0%';
-      progressText.textContent = '0%';
-      processedCount.textContent = '';
-
-      // Build form data manually to avoid duplicating file inputs
-      const formData = new FormData();
-      // append controls
-      const format = uploadForm.querySelector('select[name="format"]').value;
-      const maxw = uploadForm.querySelector('input[name="max_width"]').value || '';
-      const maxh = uploadForm.querySelector('input[name="max_height"]').value || '';
-      const qualityControl = document.getElementById('qualityRange');
-      const qualityValToSend = qualityControl ? qualityControl.value : (uploadForm.querySelector('input[name="quality"]') ? uploadForm.querySelector('input[name="quality"]').value : '85');
-      formData.append('format', format);
-      formData.append('quality', qualityValToSend);
-      formData.append('max_width', maxw);
-      formData.append('max_height', maxh);
-      // append files from our managed `files` array
-      files.forEach(f => formData.append('files', f));
-
-      // Use XHR so we can track upload progress for UX
-      const xhr = new XMLHttpRequest();
-      xhr.open('POST', '/start', true);
-      xhr.responseType = 'json';
-
-      xhr.upload.onprogress = function(e) {
-        if (e.lengthComputable) {
-          const percent = Math.round((e.loaded / e.total) * 100 * 0.4); // upload is ~40% of the visual progress
-          progressBar.style.width = percent + '%';
-          progressText.textContent = percent + '%';
-        }
-      };
-
-      xhr.onload = function() {
-        if (xhr.status === 200 && xhr.response && xhr.response.job_id) {
-          const jobId = xhr.response.job_id;
-          const total = xhr.response.total || files.length;
-          imageCount.textContent = total + ' image' + (total > 1 ? 's' : '') + ' queued';
-
-          // Poll status
-          const poll = setInterval(async () => {
-            try {
-              const res = await fetch(`/status/${jobId}`);
-              const data = await res.json();
-              if (data.error) {
-                clearInterval(poll);
-                statusMsg.textContent = 'Error: ' + data.error;
-                statusMsg.className = 'text-red-400';
-                return;
-              }
-              // update per-file statuses if available
-              if (data.items) {
-                renderFileList(data.items);
-              }
-              const proc = data.processed || 0;
-              const tot = data.total || total;
-              const serverPercent = Math.round((proc / (tot || 1)) * 100 * 0.6); // remaining 60%
-              const uploadPercent = parseInt(progressText.textContent) || 0;
-              const combined = Math.min(100, uploadPercent + serverPercent);
-              progressBar.style.width = combined + '%';
-              progressText.textContent = combined + '%';
-              processedCount.textContent = proc + ' / ' + tot + ' processed';
-
-              if (data.status === 'done') {
-                clearInterval(poll);
-                progressBar.style.width = '100%';
-                progressText.textContent = '100%';
-                statusMsg.textContent = 'Done!';
-                statusMsg.className = 'text-green-400';
-                // Download
-                fetch(`/download/${jobId}`).then(r => r.blob()).then(blob => {
-                  const url = window.URL.createObjectURL(blob);
-                  const a = document.createElement('a');
-                  a.href = url;
-                  a.download = 'optimized_images.zip';
-                  document.body.appendChild(a);
-                  a.click();
-                  setTimeout(() => {
-                    window.URL.revokeObjectURL(url);
-                    document.body.removeChild(a);
-                  }, 100);
-                }).catch(err => {
-                  statusMsg.textContent = 'Download error';
-                  statusMsg.className = 'text-red-400';
-                });
-              } else if (data.status === 'error') {
-                clearInterval(poll);
-                statusMsg.textContent = 'Error: ' + data.error;
-                statusMsg.className = 'text-red-400';
-              }
-            } catch (err) {
-              clearInterval(poll);
-              statusMsg.textContent = 'Status error';
-              statusMsg.className = 'text-red-400';
-            }
-          }, 600);
-
-        } else {
-          statusMsg.textContent = 'Failed to start job.';
-          statusMsg.className = 'text-red-400';
-        }
-      };
-
-      xhr.onerror = function() {
-        statusMsg.textContent = 'Network error.';
-        statusMsg.className = 'text-red-400';
-      };
-
+    uploadForm.addEventListener('submit', function(e) { e.preventDefault(); statusMsg.textContent = ''; statusMsg.className = ''; if (files.length === 0) { statusMsg.textContent = 'Please select at least one file.'; statusMsg.className = 'text-red-400'; return; } progressArea.classList.remove('hidden'); progressBar.style.width = '0%'; progressText.textContent = '0%'; processedCount.textContent = '';
+      const formData = new FormData(); const format = uploadForm.querySelector('select[name="format"]').value; const maxw = uploadForm.querySelector('input[name="max_width"]').value || ''; const maxh = uploadForm.querySelector('input[name="max_height"]').value || ''; const qualityControl = document.getElementById('qualityRange'); const qualityValToSend = qualityControl ? qualityControl.value : (uploadForm.querySelector('input[name="quality"]') ? uploadForm.querySelector('input[name="quality"]').value : '85'); formData.append('format', format); formData.append('quality', qualityValToSend); formData.append('max_width', maxw); formData.append('max_height', maxh); files.forEach(f => formData.append('files', f)); const combineCheckbox = document.getElementById('combinePdf'); formData.append('combine_pdf', combineCheckbox && combineCheckbox.checked ? '1' : '0');
+      const xhr = new XMLHttpRequest(); xhr.open('POST', '/start', true); xhr.responseType = 'json'; xhr.upload.onprogress = function(e) { if (e.lengthComputable) { const percent = Math.round((e.loaded / e.total) * 100 * 0.4); progressBar.style.width = percent + '%'; progressText.textContent = percent + '%'; } };
+      xhr.onload = function() { if (xhr.status === 200 && xhr.response && xhr.response.job_id) { const jobId = xhr.response.job_id; const total = xhr.response.total || files.length; imageCount.textContent = total + ' file' + (total > 1 ? 's' : '') + ' queued'; const poll = setInterval(async () => { try { const res = await fetch(`/status/${jobId}`); const data = await res.json(); if (data.error) { clearInterval(poll); statusMsg.textContent = 'Error: ' + data.error; statusMsg.className = 'text-red-400'; return; } if (data.items) { renderFileList(data.items); } const proc = data.processed || 0; const tot = data.total || total; const serverPercent = Math.round((proc / (tot || 1)) * 100 * 0.6); const uploadPercent = parseInt(progressText.textContent) || 0; const combined = Math.min(100, uploadPercent + serverPercent); progressBar.style.width = combined + '%'; progressText.textContent = combined + '%'; processedCount.textContent = proc + ' / ' + tot + ' processed'; if (data.status === 'done') { clearInterval(poll); progressBar.style.width = '100%'; progressText.textContent = '100%'; statusMsg.textContent = 'Done!'; statusMsg.className = 'text-green-400'; fetch(`/download/${jobId}`).then(r => r.blob()).then(blob => { const url = window.URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'optimized_images.zip'; document.body.appendChild(a); a.click(); setTimeout(() => { window.URL.revokeObjectURL(url); document.body.removeChild(a); }, 100); }).catch(err => { statusMsg.textContent = 'Download error'; statusMsg.className = 'text-red-400'; }); } else if (data.status === 'error') { clearInterval(poll); statusMsg.textContent = 'Error: ' + data.error; statusMsg.className = 'text-red-400'; } } catch (err) { clearInterval(poll); statusMsg.textContent = 'Status error'; statusMsg.className = 'text-red-400'; } }, 600); } else { statusMsg.textContent = 'Failed to start job.'; statusMsg.className = 'text-red-400'; } };
+      xhr.onerror = function() { statusMsg.textContent = 'Network error.'; statusMsg.className = 'text-red-400'; };
       xhr.send(formData);
     });
   </script>
@@ -358,7 +267,7 @@ def optimize_images():
 # pip install flask pillow
 
 
-def _process_job(job_id, file_blobs, output_format, quality, max_w, max_h):
+def _process_job(job_id, file_blobs, output_format, quality, max_w, max_h, combine_pdf=False):
   """Background worker to process images for a job and write a ZIP to disk.
   Updates the shared `jobs` dict with progress.
   """
@@ -366,6 +275,7 @@ def _process_job(job_id, file_blobs, output_format, quality, max_w, max_h):
     zip_buffer = io.BytesIO()
     processed = 0
     total = len(file_blobs)
+    combined_pages = [] if (output_format == 'pdf' and combine_pdf) else None
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
       for idx, (name, blob) in enumerate(file_blobs):
         # mark processing
@@ -373,6 +283,90 @@ def _process_job(job_id, file_blobs, output_format, quality, max_w, max_h):
           if job_id in jobs and 'items' in jobs[job_id] and idx < len(jobs[job_id]['items']):
             jobs[job_id]['items'][idx]['status'] = 'processing'
         try:
+          # Handle PDF inputs before attempting to open as images
+          in_name_l = name.lower()
+          if in_name_l.endswith('.pdf') and output_format in ('webp', 'jpeg', 'png', 'avif'):
+            if not convert_from_bytes and not fitz:
+              raise RuntimeError('pdf2image not available; install pdf2image and poppler, or install PyMuPDF as a fallback')
+            # Choose rendering DPI based on requested quality to preserve visual detail
+            try:
+              qval = int(quality)
+            except Exception:
+              qval = 85
+            if qval >= 95:
+              dpi = 400
+            elif qval >= 90:
+              dpi = 300
+            elif qval >= 75:
+              dpi = 200
+            else:
+              dpi = 150
+            try:
+              # prefer pdf2image when available for accurate rendering
+              if convert_from_bytes:
+                pages = convert_from_bytes(blob, dpi=dpi)
+              else:
+                raise RuntimeError('pdf2image not available')
+            except Exception as e:
+              # pdf2image failed (often due to missing poppler). Try PyMuPDF (fitz) as a fallback if available.
+              if fitz:
+                try:
+                  doc = fitz.open(stream=blob, filetype='pdf')
+                  pages = []
+                  # Use matrix zoom to match DPI used by pdf2image
+                  zoom = dpi / 72.0
+                  mat = fitz.Matrix(zoom, zoom)
+                  for p in doc:
+                    pix = p.get_pixmap(matrix=mat, alpha=False)
+                    img = Image.frombytes('RGB', (pix.width, pix.height), pix.samples)
+                    pages.append(img)
+                except Exception as e2:
+                  msg = str(e2)
+                  with jobs_lock:
+                    if job_id in jobs and 'items' in jobs[job_id] and idx < len(jobs[job_id]['items']):
+                      jobs[job_id]['items'][idx]['status'] = 'error'
+                      jobs[job_id]['items'][idx]['error'] = msg + ' — Try installing poppler or PyMuPDF.'
+                      jobs[job_id]['processed'] = processed
+                  continue
+              else:
+                msg = str(e)
+                if 'poppler' in msg.lower() or 'page count' in msg.lower():
+                  msg += ' — On Windows install Poppler (add its `bin` to PATH). See https://github.com/oschwartz10612/poppler-windows/releases'
+                msg += ' — Or install PyMuPDF (`pip install pymupdf`) to enable a fallback renderer.'
+                with jobs_lock:
+                  if job_id in jobs and 'items' in jobs[job_id] and idx < len(jobs[job_id]['items']):
+                    jobs[job_id]['items'][idx]['status'] = 'error'
+                    jobs[job_id]['items'][idx]['error'] = msg
+                    jobs[job_id]['processed'] = processed
+                continue
+            # write each page as separate file (or collect pages for combined PDF)
+            for pidx, page in enumerate(pages, start=1):
+              pout = io.BytesIO()
+              fmt = output_format
+              if fmt == 'jpeg': save_fmt = 'JPEG'
+              elif fmt == 'png': save_fmt = 'PNG'
+              else: save_fmt = 'WEBP'
+              page = page.convert('RGB')
+              if save_fmt == 'WEBP':
+                page.save(pout, format='WEBP', quality=quality, method=6)
+                ext = 'webp'
+              elif save_fmt == 'PNG':
+                page.save(pout, format='PNG', optimize=True)
+                ext = 'png'
+              else:
+                page.save(pout, format='JPEG', quality=quality, optimize=True, progressive=True)
+                ext = 'jpg'
+              if combined_pages is not None:
+                combined_pages.append(page)
+              else:
+                zipf.writestr(f"{os.path.splitext(name)[0]}_page{pidx}.{ext}", pout.getvalue())
+            processed += 1
+            with jobs_lock:
+              if job_id in jobs and 'items' in jobs[job_id] and idx < len(jobs[job_id]['items']):
+                jobs[job_id]['items'][idx]['status'] = 'done'
+                jobs[job_id]['items'][idx]['out_name'] = f"{os.path.splitext(name)[0]}_pages.{output_format}"
+            continue
+
           img = Image.open(io.BytesIO(blob)).convert('RGB')
           # Resize if needed while preserving aspect ratio
           if max_w or max_h:
@@ -382,6 +376,7 @@ def _process_job(job_id, file_blobs, output_format, quality, max_w, max_h):
               target = (mw or img.width, mh or img.height)
               img.thumbnail(target, Image.LANCZOS)
           out = io.BytesIO()
+
           if output_format == 'webp':
             img.save(out, format='WEBP', quality=quality, method=6)
             ext = 'webp'
@@ -395,12 +390,20 @@ def _process_job(job_id, file_blobs, output_format, quality, max_w, max_h):
             except Exception:
               img.save(out, format='WEBP', quality=quality, method=6)
               ext = 'webp'
+          elif output_format == 'pdf':
+            # images -> single-page PDF per image
+            img.save(out, format='PDF', resolution=72)
+            ext = 'pdf'
           else:
             img.save(out, format='JPEG', quality=quality, optimize=True, progressive=True)
             ext = 'jpg'
 
           filename = os.path.splitext(name)[0]
-          zipf.writestr(f"{filename}.{ext}", out.getvalue())
+          if combined_pages is not None and output_format == 'pdf':
+            # collect the PIL image for later combined PDF
+            combined_pages.append(img)
+          else:
+            zipf.writestr(f"{filename}.{ext}", out.getvalue())
           processed += 1
           # update per-item status
           with jobs_lock:
@@ -415,6 +418,28 @@ def _process_job(job_id, file_blobs, output_format, quality, max_w, max_h):
               jobs[job_id]['items'][idx]['error'] = str(e)
             jobs[job_id]['processed'] = processed
           continue
+
+    # If combining into a single PDF, create combined PDF and add to ZIP
+    if combined_pages is not None and len(combined_pages) > 0:
+      try:
+        first, rest = combined_pages[0], combined_pages[1:]
+        outbuf = io.BytesIO()
+        first.save(outbuf, format='PDF', save_all=True, append_images=rest)
+        # The original `zipf` was closed when exiting the `with` above,
+        # so reopen the in-memory ZIP in append mode and write the combined PDF.
+        zip_buffer.seek(0)
+        with zipfile.ZipFile(zip_buffer, 'a', zipfile.ZIP_DEFLATED) as zipf2:
+          zipf2.writestr('combined.pdf', outbuf.getvalue())
+        # mark items' out_name to combined.pdf
+        with jobs_lock:
+          if job_id in jobs and 'items' in jobs[job_id]:
+            for it in jobs[job_id]['items']:
+              it['out_name'] = 'combined.pdf'
+      except Exception as e:
+        with jobs_lock:
+          jobs[job_id]['status'] = 'error'
+          jobs[job_id]['error'] = str(e)
+        return
 
     # Persist zip to temp file
     zip_buffer.seek(0)
@@ -464,7 +489,8 @@ def start_job():
     jobs[job_id] = {'total': len(file_blobs), 'processed': 0, 'status': 'processing', 'error': None, 'path': None, 'items': items}
 
   # Start background worker
-  t = threading.Thread(target=_process_job, args=(job_id, file_blobs, output_format, quality, max_w, max_h), daemon=True)
+  combine_pdf = request.form.get('combine_pdf', '0') in ('1', 'true', 'True')
+  t = threading.Thread(target=_process_job, args=(job_id, file_blobs, output_format, quality, max_w, max_h, combine_pdf), daemon=True)
   t.start()
 
   return jsonify({'job_id': job_id, 'total': len(file_blobs)})
